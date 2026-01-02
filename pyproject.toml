@@ -1,0 +1,15 @@
+[project]
+name = "daily-transcript-summary"
+version = "0.1.0"
+description = "Generate daily summaries of Claude Code transcripts"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "click>=8.0.0",
+    "markitdown>=0.1.0",
+    "claude-code-transcripts>=0.1.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+daily-summary = "daily_summary:main"
