@@ -269,6 +269,20 @@ Houd de samenvatting beknopt maar informatief. Focus op de belangrijkste punten.
     return ""
 
 
+def create_journal(target_date: date) -> Path:
+    """Create an empty journal file for the target date if it doesn't exist."""
+    date_str = target_date.strftime("%Y%m%d")
+    output_folder = OUTPUT_DIR / date_str
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    journal_path = output_folder / f"{date_str}-journal.md"
+    if not journal_path.exists():
+        header = f"# Journal - {target_date.strftime('%d %B %Y')}\n\n"
+        journal_path.write_text(header)
+
+    return journal_path
+
+
 def write_output(
     summary: str,
     stats: dict[str, int],
@@ -293,9 +307,7 @@ def write_output(
     summary_path.write_text(header + summary + sources)
 
     # Write journal (empty template)
-    journal_path = output_folder / f"{date_str}-journal.md"
-    if not journal_path.exists():
-        journal_path.write_text("# Journal\n\n")
+    create_journal(target_date)
 
     # Write stats as JSON
     stats_path = output_folder / f"{date_str}-stats.json"
@@ -318,9 +330,20 @@ def write_output(
     is_flag=True,
     help="Show what would be processed without generating summary",
 )
-def main(date_str: str | None, dry_run: bool) -> None:
+@click.option(
+    "--init-journal/--no-init-journal",
+    default=True,
+    help="Create an empty journal file for today (default: enabled)",
+)
+def main(date_str: str | None, dry_run: bool, init_journal: bool) -> None:
     """Generate a daily summary of Claude Code transcripts."""
-    # Parse date
+    # Always create today's journal first (unless disabled)
+    if init_journal:
+        today = datetime.now().date()
+        journal_path = create_journal(today)
+        click.echo(f"Journal ready: {journal_path}")
+
+    # Parse date for summary (default: yesterday)
     if date_str:
         try:
             target_date = datetime.strptime(date_str, "%Y%m%d").date()
