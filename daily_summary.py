@@ -2,6 +2,7 @@
 """Generate daily summaries of Claude Code transcripts."""
 
 import json
+import os
 import subprocess
 import tempfile
 from datetime import date, datetime, timedelta
@@ -16,7 +17,15 @@ from markitdown import MarkItDown
 load_dotenv()
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-OUTPUT_DIR = Path(__file__).parent / "claude-transcripts"
+OUTPUT_DIR = Path(
+    os.getenv(
+        "DAILY_SUMMARY_OUTPUT_DIR",
+        str(
+            Path.home()
+            / "Library/Mobile Documents/com~apple~CloudDocs/365 days of AI Code"
+        ),
+    )
+)
 
 
 def get_project_name(folder_name: str) -> str:
@@ -68,6 +77,32 @@ def has_messages_on_date(jsonl_file: Path, target_date: date) -> bool:
     except Exception:
         pass
     return False
+
+
+def filter_jsonl_by_date(jsonl_file: Path, target_date: date, temp_dir: Path) -> Path:
+    """Create a filtered JSONL file containing only entries from target_date."""
+    temp_jsonl = temp_dir / f"filtered_{jsonl_file.name}"
+
+    try:
+        with open(jsonl_file) as source, open(temp_jsonl, "w") as dest:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    timestamp = entry.get("timestamp")
+                    if timestamp:
+                        entry_date = datetime.fromisoformat(
+                            timestamp.replace("Z", "+00:00")
+                        ).date()
+                        if entry_date == target_date:
+                            dest.write(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except Exception:
+        temp_jsonl.touch()
+
+    return temp_jsonl
 
 
 def collect_stats(
@@ -132,9 +167,12 @@ def collect_stats(
 
 
 def convert_transcripts_to_html(
-    project_transcripts: dict[str, list[Path]], output_dir: Path
+    project_transcripts: dict[str, list[Path]], output_dir: Path, target_date: date
 ) -> dict[str, Path]:
-    """Convert transcript files to HTML using claude-code-transcripts."""
+    """Convert transcript files to HTML using claude-code-transcripts.
+
+    Only entries matching target_date will be included in the conversion.
+    """
     project_html_files: dict[str, Path] = {}
 
     for project_name, jsonl_files in project_transcripts.items():
@@ -142,11 +180,16 @@ def convert_transcripts_to_html(
         project_output.mkdir(parents=True, exist_ok=True)
 
         for jsonl_file in jsonl_files:
+            # Filter JSONL to only target date entries
+            filtered_jsonl = filter_jsonl_by_date(
+                jsonl_file, target_date, project_output
+            )
+
             subprocess.run(
                 [
                     "claude-code-transcripts",
                     "json",
-                    str(jsonl_file),
+                    str(filtered_jsonl),
                     "-o",
                     str(project_output),
                 ],
@@ -308,7 +351,9 @@ def main(date_str: str | None, dry_run: bool) -> None:
         temp_path = Path(temp_dir)
 
         click.echo("\nConverting transcripts to HTML...")
-        project_html = convert_transcripts_to_html(project_transcripts, temp_path)
+        project_html = convert_transcripts_to_html(
+            project_transcripts, temp_path, target_date
+        )
 
         click.echo("Converting HTML to Markdown...")
         transcripts_markdown = {

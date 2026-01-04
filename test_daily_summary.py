@@ -12,6 +12,7 @@ from daily_summary import (
     collect_stats,
     convert_html_to_markdown,
     convert_transcripts_to_html,
+    filter_jsonl_by_date,
     filter_transcripts_by_date,
     generate_summary,
     get_project_name,
@@ -70,6 +71,82 @@ class TestHasMessagesOnDate:
             f.flush()
             result = has_messages_on_date(Path(f.name), date(2026, 1, 1))
             assert result is False
+
+
+class TestFilterJsonlByDate:
+    """Tests for filter_jsonl_by_date function."""
+
+    def test_filters_entries_by_date(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_dir = Path(tmpdir)
+            jsonl_file = temp_dir / "test.jsonl"
+            jsonl_file.write_text(
+                json.dumps({"timestamp": "2026-01-01T10:00:00Z", "type": "user"})
+                + "\n"
+                + json.dumps({"timestamp": "2026-01-01T11:00:00Z", "type": "assistant"})
+                + "\n"
+            )
+
+            filtered = filter_jsonl_by_date(jsonl_file, date(2026, 1, 1), temp_dir)
+
+            assert filtered.exists()
+            content = filtered.read_text()
+            lines = [line for line in content.split("\n") if line.strip()]
+            assert len(lines) == 2
+
+    def test_handles_multiple_dates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_dir = Path(tmpdir)
+            jsonl_file = temp_dir / "test.jsonl"
+            jsonl_file.write_text(
+                json.dumps({"timestamp": "2026-01-01T10:00:00Z", "type": "user"})
+                + "\n"
+                + json.dumps({"timestamp": "2026-01-02T10:00:00Z", "type": "user"})
+                + "\n"
+                + json.dumps({"timestamp": "2026-01-01T11:00:00Z", "type": "assistant"})
+                + "\n"
+            )
+
+            filtered = filter_jsonl_by_date(jsonl_file, date(2026, 1, 1), temp_dir)
+
+            content = filtered.read_text()
+            lines = [line for line in content.split("\n") if line.strip()]
+            assert len(lines) == 2
+            # Verify it only has Jan 1 entries
+            for line in lines:
+                entry = json.loads(line)
+                assert "2026-01-01" in entry["timestamp"]
+
+    def test_returns_empty_file_when_no_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_dir = Path(tmpdir)
+            jsonl_file = temp_dir / "test.jsonl"
+            jsonl_file.write_text(
+                json.dumps({"timestamp": "2026-01-02T10:00:00Z", "type": "user"}) + "\n"
+            )
+
+            filtered = filter_jsonl_by_date(jsonl_file, date(2026, 1, 1), temp_dir)
+
+            assert filtered.exists()
+            content = filtered.read_text()
+            assert content.strip() == ""
+
+    def test_skips_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_dir = Path(tmpdir)
+            jsonl_file = temp_dir / "test.jsonl"
+            jsonl_file.write_text(
+                "invalid json\n"
+                + json.dumps({"timestamp": "2026-01-01T10:00:00Z", "type": "user"})
+                + "\n"
+                + "another invalid line\n"
+            )
+
+            filtered = filter_jsonl_by_date(jsonl_file, date(2026, 1, 1), temp_dir)
+
+            content = filtered.read_text()
+            lines = [line for line in content.split("\n") if line.strip()]
+            assert len(lines) == 1
 
 
 class TestCollectStats:
@@ -279,7 +356,9 @@ class TestConvertTranscriptsToHtml:
             output_dir.mkdir()
 
             with patch("daily_summary.subprocess.run") as mock_run:
-                convert_transcripts_to_html({"project": [jsonl_file]}, output_dir)
+                convert_transcripts_to_html(
+                    {"project": [jsonl_file]}, output_dir, date(2026, 1, 1)
+                )
                 mock_run.assert_called()
 
 
