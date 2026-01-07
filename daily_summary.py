@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from datetime import date, datetime, timedelta
@@ -26,6 +27,78 @@ OUTPUT_DIR = Path(
         ),
     )
 )
+
+# Patterns for detecting secrets (compiled for performance)
+SECRET_PATTERNS = [
+    # API keys (generic patterns)
+    (
+        re.compile(
+            r'(?i)(api[_-]?key|apikey)\s*[:=]\s*["\']?([a-zA-Z0-9_\-]{20,})["\']?'
+        ),
+        r"\1=***REDACTED***",
+    ),
+    # Bearer tokens
+    (re.compile(r"(?i)(bearer\s+)([a-zA-Z0-9_\-\.]{20,})"), r"\1***REDACTED***"),
+    # JWT tokens
+    (
+        re.compile(r"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"),
+        "***JWT_REDACTED***",
+    ),
+    # AWS access keys
+    (
+        re.compile(
+            r'(?i)(aws[_-]?access[_-]?key[_-]?id)\s*[:=]\s*["\']?([A-Z0-9]{20})["\']?'
+        ),
+        r"\1=***REDACTED***",
+    ),
+    (
+        re.compile(
+            r'(?i)(aws[_-]?secret[_-]?access[_-]?key)\s*[:=]\s*["\']?([a-zA-Z0-9/+=]{40})["\']?'
+        ),
+        r"\1=***REDACTED***",
+    ),
+    # Generic secret/password patterns
+    (
+        re.compile(
+            r'(?i)(password|passwd|pwd|secret|token|credential)\s*[:=]\s*["\']?([^\s"\']{8,})["\']?'
+        ),
+        r"\1=***REDACTED***",
+    ),
+    # Private keys
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----"
+        ),
+        "***PRIVATE_KEY_REDACTED***",
+    ),
+    # Connection strings with passwords
+    (
+        re.compile(r"(?i)(mongodb|postgres|mysql|redis|amqp)://[^:]+:([^@]+)@"),
+        r"\1://***:***REDACTED***@",
+    ),
+    # Generic hex tokens (32+ chars)
+    (
+        re.compile(
+            r'(?i)(token|key|secret|auth)\s*[:=]\s*["\']?([a-fA-F0-9]{32,})["\']?'
+        ),
+        r"\1=***REDACTED***",
+    ),
+    # OpenAI/Anthropic API keys
+    (re.compile(r"sk-[a-zA-Z0-9]{20,}"), "***API_KEY_REDACTED***"),
+    (re.compile(r"sk-ant-[a-zA-Z0-9\-]{20,}"), "***API_KEY_REDACTED***"),
+    # GitHub tokens
+    (re.compile(r"ghp_[a-zA-Z0-9]{36,}"), "***GITHUB_TOKEN_REDACTED***"),
+    (re.compile(r"github_pat_[a-zA-Z0-9_]{22,}"), "***GITHUB_TOKEN_REDACTED***"),
+    # Slack tokens
+    (re.compile(r"xox[baprs]-[a-zA-Z0-9\-]{10,}"), "***SLACK_TOKEN_REDACTED***"),
+]
+
+
+def sanitize_secrets(text: str) -> str:
+    """Remove or obfuscate secrets from text."""
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def get_project_name(folder_name: str) -> str:
@@ -80,7 +153,10 @@ def has_messages_on_date(jsonl_file: Path, target_date: date) -> bool:
 
 
 def filter_jsonl_by_date(jsonl_file: Path, target_date: date, temp_dir: Path) -> Path:
-    """Create a filtered JSONL file containing only entries from target_date."""
+    """Create a filtered JSONL file containing only entries from target_date.
+
+    Secrets are sanitized/obfuscated before writing to the temp file.
+    """
     temp_jsonl = temp_dir / f"filtered_{jsonl_file.name}"
 
     try:
@@ -96,7 +172,9 @@ def filter_jsonl_by_date(jsonl_file: Path, target_date: date, temp_dir: Path) ->
                             timestamp.replace("Z", "+00:00")
                         ).date()
                         if entry_date == target_date:
-                            dest.write(line)
+                            # Sanitize secrets before writing
+                            sanitized_line = sanitize_secrets(line)
+                            dest.write(sanitized_line)
                 except (json.JSONDecodeError, ValueError):
                     continue
     except Exception:
@@ -236,6 +314,8 @@ def generate_summary(transcripts_markdown: dict[str, str], target_date: date) ->
 
     prompt = f"""Analyseer de volgende Claude Code transcripties van {target_date.strftime("%d %B %Y")} en maak een beknopte samenvatting in het Nederlands.
 
+BELANGRIJK: Neem NOOIT wachtwoorden, API keys, tokens, secrets, credentials of andere gevoelige informatie op in de samenvatting. Als je gevoelige informatie tegenkomt, negeer deze dan volledig.
+
 {full_context}
 
 Maak een samenvatting met de volgende secties:
@@ -272,7 +352,8 @@ Houd de samenvatting beknopt maar informatief. Focus op de belangrijkste punten.
 def create_journal(target_date: date) -> Path:
     """Create an empty journal file for the target date if it doesn't exist."""
     date_str = target_date.strftime("%Y%m%d")
-    output_folder = OUTPUT_DIR / date_str
+    month_str = date_str[:6]  # e.g., 202601
+    output_folder = OUTPUT_DIR / month_str / date_str
     output_folder.mkdir(parents=True, exist_ok=True)
 
     journal_path = output_folder / f"{date_str}-journal.md"
@@ -289,9 +370,10 @@ def write_output(
     target_date: date,
     project_transcripts: dict[str, list[Path]],
 ) -> Path:
-    """Write all output files to a dated folder."""
+    """Write all output files to a dated folder within a month folder."""
     date_str = target_date.strftime("%Y%m%d")
-    output_folder = OUTPUT_DIR / date_str
+    month_str = date_str[:6]  # e.g., 202601
+    output_folder = OUTPUT_DIR / month_str / date_str
     output_folder.mkdir(parents=True, exist_ok=True)
 
     # Build sources section

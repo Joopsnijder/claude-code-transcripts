@@ -13,3 +13,6 @@ dependencies = [
 
 [project.scripts]
 daily-summary = "daily_summary:main"
+
+[tool.setuptools]
+py-modules = ["daily_summary"]

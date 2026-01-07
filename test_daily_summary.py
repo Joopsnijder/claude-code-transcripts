@@ -18,6 +18,7 @@ from daily_summary import (
     get_project_name,
     has_messages_on_date,
     main,
+    sanitize_secrets,
     write_output,
 )
 
@@ -413,3 +414,124 @@ class TestMain:
         runner = CliRunner()
         result = runner.invoke(main, ["--date", "invalid"])
         assert result.exit_code != 0
+
+
+class TestSanitizeSecrets:
+    """Tests for sanitize_secrets function."""
+
+    def test_openai_api_key_standalone(self) -> None:
+        """Test that standalone OpenAI API keys are redacted."""
+        text = "The key is sk-1234567890abcdefghijklmnopqrstuvwxyz"
+        result = sanitize_secrets(text)
+        assert "sk-1234567890abcdefghijklmnopqrstuvwxyz" not in result
+        assert "REDACTED" in result
+
+    def test_anthropic_api_key_standalone(self) -> None:
+        """Test that standalone Anthropic API keys are redacted."""
+        text = "Use this: sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890"
+        result = sanitize_secrets(text)
+        assert "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890" not in result
+        assert "REDACTED" in result
+
+    def test_github_token_standalone(self) -> None:
+        """Test that standalone GitHub tokens are redacted."""
+        text = "Token: ghp_1234567890abcdefghijklmnopqrstuvwxyz1234"
+        result = sanitize_secrets(text)
+        assert "ghp_1234567890abcdefghijklmnopqrstuvwxyz1234" not in result
+        assert "REDACTED" in result
+
+    def test_github_pat_standalone(self) -> None:
+        """Test that standalone GitHub personal access tokens are redacted."""
+        text = "Use github_pat_11ABCDEFGH_abcdefghijklmnopqrstuvwxyz"
+        result = sanitize_secrets(text)
+        assert "github_pat_11ABCDEFGH_abcdefghijklmnopqrstuvwxyz" not in result
+        assert "REDACTED" in result
+
+    def test_password_pattern(self) -> None:
+        """Test that passwords are redacted."""
+        text = 'password="SuperSecretP@ssw0rd!"'
+        result = sanitize_secrets(text)
+        assert "SuperSecretP@ssw0rd!" not in result
+        assert "REDACTED" in result
+
+    def test_jwt_token_standalone(self) -> None:
+        """Test that standalone JWT tokens are redacted."""
+        jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        text = f"Token is {jwt}"
+        result = sanitize_secrets(text)
+        assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in result
+        assert "REDACTED" in result
+
+    def test_postgres_connection_string(self) -> None:
+        """Test that database connection strings are redacted."""
+        text = "postgres://user:mysecretpassword@localhost:5432/mydb"
+        result = sanitize_secrets(text)
+        assert "mysecretpassword" not in result
+        assert "REDACTED" in result
+
+    def test_mongodb_connection_string(self) -> None:
+        """Test that MongoDB connection strings are redacted."""
+        text = "mongodb://admin:password123@cluster.mongodb.net/db"
+        result = sanitize_secrets(text)
+        assert "password123" not in result
+        assert "REDACTED" in result
+
+    def test_private_key(self) -> None:
+        """Test that private keys are redacted."""
+        text = """-----BEGIN RSA PRIVATE KEY-----
+MIIEpQIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyf8Jz
+-----END RSA PRIVATE KEY-----"""
+        result = sanitize_secrets(text)
+        assert "MIIEpQIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyf8Jz" not in result
+        assert "PRIVATE_KEY_REDACTED" in result
+
+    def test_slack_token_standalone(self) -> None:
+        """Test that standalone Slack tokens are redacted."""
+        text = "Slack: xoxb-1234567890-abcdefghij"
+        result = sanitize_secrets(text)
+        assert "xoxb-1234567890-abcdefghij" not in result
+        assert "REDACTED" in result
+
+    def test_aws_access_key(self) -> None:
+        """Test that AWS access keys are redacted."""
+        text = 'AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE"'
+        result = sanitize_secrets(text)
+        assert "AKIAIOSFODNN7EXAMPLE" not in result
+        assert "REDACTED" in result
+
+    def test_aws_secret_key(self) -> None:
+        """Test that AWS secret keys are redacted."""
+        text = 'aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"'
+        result = sanitize_secrets(text)
+        assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in result
+        assert "REDACTED" in result
+
+    def test_bearer_token(self) -> None:
+        """Test that Bearer tokens are redacted."""
+        text = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz1234567890"
+        result = sanitize_secrets(text)
+        assert "abcdefghijklmnopqrstuvwxyz1234567890" not in result
+        assert "REDACTED" in result
+
+    def test_normal_text_preserved(self) -> None:
+        """Test that normal text is not affected."""
+        text = "This is a normal message about programming."
+        result = sanitize_secrets(text)
+        assert result == text
+
+    def test_multiple_secrets(self) -> None:
+        """Test that multiple secrets in one text are all redacted."""
+        text = """
+        password="SecretPass123"
+        Key: sk-abcdefghijklmnopqrstuvwxyz1234
+        """
+        result = sanitize_secrets(text)
+        assert "SecretPass123" not in result
+        assert "sk-abcdefghijklmnopqrstuvwxyz1234" not in result
+
+    def test_env_variable_with_secret(self) -> None:
+        """Test that environment variable style secrets are redacted."""
+        text = 'secret="abcdefghij123456"'
+        result = sanitize_secrets(text)
+        assert "abcdefghij123456" not in result
+        assert "REDACTED" in result
