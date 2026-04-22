@@ -38,6 +38,12 @@ python daily_summary.py --date 20260101
 
 # Dry-run (toon welke transcripties worden verwerkt)
 python daily_summary.py --dry-run
+
+# Bewaar ook HTML transcript bestanden
+python daily_summary.py --save-html
+
+# Skip journal file creatie voor vandaag
+python daily_summary.py --no-init-journal
 ```
 
 ## Output
@@ -46,10 +52,16 @@ Per dag wordt een folder aangemaakt met drie bestanden in je iCloud Drive:
 
 ```text
 ~/Library/Mobile Documents/com~apple~CloudDocs/365 days of AI Code/
-└── 20260101/
-    ├── 20260101-summary.md   # AI-gegenereerde samenvatting + bronverwijzingen
-    ├── 20260101-journal.md   # Leeg template voor eigen notities
-    └── 20260101-stats.json   # Statistieken in JSON formaat
+└── 202601/
+    └── 20260101/
+        ├── 20260101-summary.md   # AI-gegenereerde samenvatting + bronverwijzingen
+        ├── 20260101-journal.md   # Leeg template voor eigen notities
+        ├── 20260101-stats.json   # Statistieken in JSON formaat
+        └── html/                 # HTML transcripts (optioneel met --save-html)
+            ├── project1/
+            │   └── session-xxx.html
+            └── project2/
+                └── session-yyy.html
 ```
 
 Voorbeeld `stats.json`:
@@ -72,13 +84,19 @@ De summary bevat onderaan een "Bronnen" sectie met links naar de originele trans
 
 1. **Vindt transcripties**: Filtert `.jsonl` bestanden uit `~/.claude/projects/` die de target datum bevatten
 2. **Date filtering**: Maakt tijdelijke gefilterde JSONL files met *alleen* entries van de target datum
-3. **HTML conversie**: Converteert gefilterde transcripties naar HTML via `claude-code-transcripts`
-4. **Markdown conversie**: Converteert HTML naar markdown via `markitdown`
-5. **Statistieken**: Verzamelt stats (prompts, messages, tool calls, commits) voor de target datum
-6. **AI samenvatting**: Genereert Nederlandse samenvatting met Claude API (claude-sonnet-4)
-7. **Output**: Schrijft alle bestanden naar iCloud Drive (`~/Library/Mobile Documents/com~apple~CloudDocs/365 days of AI Code/`)
+3. **Secret sanitization**: Verwijdert automatisch API keys, tokens en andere gevoelige informatie
+4. **HTML conversie**: Converteert gefilterde transcripties naar HTML via `claude-code-transcripts`
+5. **Markdown conversie**: Converteert HTML naar markdown via `markitdown`
+6. **Statistieken**: Verzamelt stats (prompts, messages, tool calls, commits) voor de target datum
+7. **AI samenvatting**: Genereert Nederlandse samenvatting met Claude API (claude-sonnet-4)
+8. **Output**: Schrijft alle bestanden naar een gedateerde folder in iCloud Drive
+9. **HTML backup** (optioneel): Bewaart HTML transcripts met `--save-html` flag
 
-**Belangrijk:** Door de date filtering in stap 2 bevat de summary alleen content van de gevraagde datum, zelfs als een JSONL bestand entries van meerdere datums bevat.
+**Belangrijk:**
+
+- Door de date filtering in stap 2 bevat de summary alleen content van de gevraagde datum, zelfs als een JSONL bestand entries van meerdere datums bevat
+- Secrets worden automatisch verwijderd uit de gefilterde JSONL files voordat ze worden geconverteerd
+- HTML-bestanden worden standaard NIET bewaard (alleen gebruikt voor markdown conversie)
 
 ## Dependencies
 

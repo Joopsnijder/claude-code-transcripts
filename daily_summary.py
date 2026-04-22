@@ -4,6 +4,7 @@
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import tempfile
 from datetime import date, datetime, timedelta
@@ -18,6 +19,10 @@ from markitdown import MarkItDown
 load_dotenv()
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+VSCODE_WORKSPACE_STORAGE_DIR = (
+    Path.home() / "Library" / "Application Support" / "Code" / "User" / "workspaceStorage"
+)
+OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 OUTPUT_DIR = Path(
     os.getenv(
         "DAILY_SUMMARY_OUTPUT_DIR",
@@ -108,7 +113,142 @@ def get_project_name(folder_name: str) -> str:
     return parts[-1] if len(parts) > 1 else folder_name
 
 
+def get_vscode_workspace_name(storage_dir: Path) -> str | None:
+    """Get the project name from a VS Code workspace storage directory."""
+    workspace_json = storage_dir / "workspace.json"
+    if not workspace_json.exists():
+        return None
+    try:
+        data = json.loads(workspace_json.read_text())
+        folder_uri = data.get("folder", "")
+        if folder_uri.startswith("file://"):
+            folder_path = folder_uri[len("file://"):]
+            return Path(folder_path).name
+    except Exception:
+        pass
+    return None
+
+
 def filter_transcripts_by_date(target_date: date) -> dict[str, list[Path]]:
+    """Find all Claude Code transcript files that contain messages from the target date."""
+    projects_with_transcripts: dict[str, list[Path]] = {}
+
+    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+
+        project_name = get_project_name(project_dir.name)
+        matching_files = []
+
+        for jsonl_file in project_dir.glob("*.jsonl"):
+            if has_messages_on_date(jsonl_file, target_date):
+                matching_files.append(jsonl_file)
+
+        if matching_files:
+            projects_with_transcripts[project_name] = matching_files
+
+    return projects_with_transcripts
+
+
+def filter_copilot_transcripts_by_date(target_date: date) -> dict[str, list[Path]]:
+    """Find VS Code Copilot chat transcripts with messages from target_date."""
+    if not VSCODE_WORKSPACE_STORAGE_DIR.exists():
+        return {}
+
+    projects_with_transcripts: dict[str, list[Path]] = {}
+
+    for storage_dir in VSCODE_WORKSPACE_STORAGE_DIR.iterdir():
+        if not storage_dir.is_dir():
+            continue
+
+        transcripts_dir = storage_dir / "GitHub.copilot-chat" / "transcripts"
+        if not transcripts_dir.exists():
+            continue
+
+        project_name = get_vscode_workspace_name(storage_dir)
+        if not project_name:
+            continue
+
+        # Prefix to distinguish from Claude Code transcripts
+        keyed_name = f"copilot:{project_name}"
+        matching_files = []
+
+        for jsonl_file in transcripts_dir.glob("*.jsonl"):
+            if has_messages_on_date(jsonl_file, target_date):
+                matching_files.append(jsonl_file)
+
+        if matching_files:
+            projects_with_transcripts[keyed_name] = matching_files
+
+    return projects_with_transcripts
+
+
+def convert_copilot_transcript_to_markdown(jsonl_file: Path, target_date: date) -> str:
+    """Convert a single Copilot chat transcript JSONL file to readable Markdown."""
+    lines_out: list[str] = []
+
+    try:
+        with open(jsonl_file) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                timestamp = entry.get("timestamp")
+                if not timestamp:
+                    continue
+
+                try:
+                    entry_date = datetime.fromisoformat(
+                        timestamp.replace("Z", "+00:00")
+                    ).date()
+                except ValueError:
+                    continue
+
+                if entry_date != target_date:
+                    continue
+
+                entry_type = entry.get("type", "")
+                data = entry.get("data", {})
+
+                if entry_type == "user.message":
+                    content = data.get("content", "")
+                    if content:
+                        lines_out.append(f"**User:** {sanitize_secrets(str(content))}\n")
+
+                elif entry_type == "assistant.message":
+                    content = data.get("content", "")
+                    tool_requests = data.get("toolRequests", [])
+                    if content:
+                        lines_out.append(
+                            f"**Assistant:** {sanitize_secrets(str(content))}\n"
+                        )
+                    for tool in tool_requests:
+                        tool_name = tool.get("name", "")
+                        args_raw = tool.get("arguments", "")
+                        try:
+                            args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                            explanation = args.get("explanation", "")
+                            goal = args.get("goal", "")
+                            label = explanation or goal or ""
+                        except Exception:
+                            label = ""
+                        if tool_name:
+                            tool_line = f"  *Tool: `{tool_name}`*"
+                            if label:
+                                tool_line += f" — {sanitize_secrets(label)}"
+                            lines_out.append(tool_line + "\n")
+
+    except Exception:
+        pass
+
+    return "\n".join(lines_out)
+
+
+
     """Find all transcript files that contain messages from the target date."""
     projects_with_transcripts: dict[str, list[Path]] = {}
 
@@ -127,6 +267,130 @@ def filter_transcripts_by_date(target_date: date) -> dict[str, list[Path]]:
             projects_with_transcripts[project_name] = matching_files
 
     return projects_with_transcripts
+
+
+def get_opencode_sessions_for_date(target_date: date) -> list[dict]:
+    """Query OpenCode SQLite database for sessions with activity on target_date."""
+    if not OPENCODE_DB.exists():
+        return []
+
+    # Epoch milliseconds range for the target date (UTC)
+    start_ms = int(datetime(target_date.year, target_date.month, target_date.day).timestamp() * 1000)
+    end_ms = start_ms + 86_400_000  # 24 hours
+
+    try:
+        conn = sqlite3.connect(str(OPENCODE_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT s.id, s.title, s.directory
+            FROM session s
+            JOIN message m ON m.session_id = s.id
+            WHERE m.time_created >= ? AND m.time_created < ?
+            """,
+            (start_ms, end_ms),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def convert_opencode_session_to_markdown(session_id: str, target_date: date) -> str:
+    """Convert an OpenCode session to readable Markdown by querying the database."""
+    if not OPENCODE_DB.exists():
+        return ""
+
+    start_ms = int(datetime(target_date.year, target_date.month, target_date.day).timestamp() * 1000)
+    end_ms = start_ms + 86_400_000
+
+    lines_out: list[str] = []
+
+    try:
+        conn = sqlite3.connect(str(OPENCODE_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        # Get messages and their parts for this session on target_date
+        cur.execute(
+            """
+            SELECT m.id, m.time_created, json_extract(m.data, '$.role') as role
+            FROM message m
+            WHERE m.session_id = ? AND m.time_created >= ? AND m.time_created < ?
+            ORDER BY m.time_created, m.id
+            """,
+            (session_id, start_ms, end_ms),
+        )
+        messages = cur.fetchall()
+
+        for msg in messages:
+            msg_id = msg["id"]
+            role = msg["role"] or "unknown"
+
+            cur.execute(
+                """
+                SELECT data FROM part
+                WHERE message_id = ?
+                ORDER BY time_created, id
+                """,
+                (msg_id,),
+            )
+            parts = cur.fetchall()
+
+            text_parts: list[str] = []
+            tool_lines: list[str] = []
+
+            for part_row in parts:
+                try:
+                    part = json.loads(part_row["data"])
+                except Exception:
+                    continue
+
+                part_type = part.get("type", "")
+                if part_type == "text":
+                    text = part.get("text", "").strip()
+                    if text:
+                        text_parts.append(sanitize_secrets(text))
+                elif part_type == "tool":
+                    tool_name = part.get("tool", "")
+                    state = part.get("state", {})
+                    title = state.get("title", "") or (
+                        (state.get("input") or {}).get("description", "")
+                    )
+                    if tool_name:
+                        line = f"  *Tool: `{tool_name}`*"
+                        if title:
+                            line += f" — {sanitize_secrets(title)}"
+                        tool_lines.append(line)
+
+            if text_parts or tool_lines:
+                label = "**User:**" if role == "user" else "**Assistant:**"
+                if text_parts:
+                    lines_out.append(f"{label} {' '.join(text_parts)}\n")
+                for tl in tool_lines:
+                    lines_out.append(tl + "\n")
+
+        conn.close()
+    except Exception:
+        pass
+
+    return "\n".join(lines_out)
+
+
+def collect_opencode_transcripts_for_date(target_date: date) -> dict[str, str]:
+    """Return {project_label: markdown} for all OpenCode sessions on target_date."""
+    sessions = get_opencode_sessions_for_date(target_date)
+    result: dict[str, str] = {}
+    for session in sessions:
+        project_dir = Path(session["directory"])
+        project_name = project_dir.name or session["directory"]
+        label = f"opencode:{project_name} ({session['title'][:50]})"
+        md = convert_opencode_session_to_markdown(session["id"], target_date)
+        if md:
+            result[label] = md
+    return result
 
 
 def has_messages_on_date(jsonl_file: Path, target_date: date) -> bool:
@@ -364,6 +628,21 @@ def create_journal(target_date: date) -> Path:
     return journal_path
 
 
+def copy_html_files(
+    project_html: dict[str, Path], target_date: date, output_folder: Path
+) -> None:
+    """Copy HTML files from temp directory to output folder."""
+    for project_name, html_dir in project_html.items():
+        html_files = list(html_dir.glob("**/*.html"))
+        if html_files:
+            project_html_folder = output_folder / "html" / project_name
+            project_html_folder.mkdir(parents=True, exist_ok=True)
+
+            for html_file in html_files:
+                dest = project_html_folder / html_file.name
+                dest.write_text(html_file.read_text())
+
+
 def write_output(
     summary: str,
     stats: dict[str, int],
@@ -382,6 +661,8 @@ def write_output(
         if files:
             folder = files[0].parent
             sources += f"- **{project_name}**: `{folder}`\n"
+        else:
+            sources += f"- **{project_name}**\n"
 
     # Write summary
     summary_path = output_folder / f"{date_str}-summary.md"
@@ -417,7 +698,12 @@ def write_output(
     default=True,
     help="Create an empty journal file for today (default: enabled)",
 )
-def main(date_str: str | None, dry_run: bool, init_journal: bool) -> None:
+@click.option(
+    "--save-html",
+    is_flag=True,
+    help="Save HTML transcript files to output directory",
+)
+def main(date_str: str | None, dry_run: bool, init_journal: bool, save_html: bool) -> None:
     """Generate a daily summary of Claude Code transcripts."""
     # Always create today's journal first (unless disabled)
     if init_journal:
@@ -436,16 +722,32 @@ def main(date_str: str | None, dry_run: bool, init_journal: bool) -> None:
 
     click.echo(f"Processing transcripts for {target_date.strftime('%Y-%m-%d')}...")
 
-    # Find transcripts for the target date
+    # Find Claude Code transcripts for the target date
     project_transcripts = filter_transcripts_by_date(target_date)
 
-    if not project_transcripts:
+    # Find VS Code Copilot transcripts
+    copilot_transcripts = filter_copilot_transcripts_by_date(target_date)
+
+    # Find OpenCode sessions
+    opencode_transcripts = collect_opencode_transcripts_for_date(target_date)
+
+    if not project_transcripts and not copilot_transcripts and not opencode_transcripts:
         click.echo("No transcripts found for this date.")
         return
 
     click.echo(f"Found transcripts in {len(project_transcripts)} project(s):")
     for project_name, files in project_transcripts.items():
         click.echo(f"  - {project_name}: {len(files)} file(s)")
+
+    if copilot_transcripts:
+        click.echo(f"Found Copilot transcripts in {len(copilot_transcripts)} workspace(s):")
+        for project_name, files in copilot_transcripts.items():
+            click.echo(f"  - {project_name}: {len(files)} file(s)")
+
+    if opencode_transcripts:
+        click.echo(f"Found OpenCode sessions: {len(opencode_transcripts)}")
+        for label in opencode_transcripts:
+            click.echo(f"  - {label}")
 
     if dry_run:
         click.echo("\nDry run - no summary generated.")
@@ -466,16 +768,40 @@ def main(date_str: str | None, dry_run: bool, init_journal: bool) -> None:
             for project, html_dir in project_html.items()
         }
 
-    # Collect stats
-    click.echo("Collecting statistics...")
-    stats = collect_stats(project_transcripts, target_date)
+        # Add Copilot transcripts as Markdown directly (no HTML conversion needed)
+        for project_name, jsonl_files in copilot_transcripts.items():
+            parts = [
+                convert_copilot_transcript_to_markdown(f, target_date)
+                for f in jsonl_files
+            ]
+            combined = "\n\n---\n\n".join(p for p in parts if p)
+            if combined:
+                transcripts_markdown[project_name] = combined
 
-    # Generate summary with Claude
-    click.echo("Generating summary with Claude...")
-    summary = generate_summary(transcripts_markdown, target_date)
+        # Add OpenCode sessions as Markdown directly
+        transcripts_markdown.update(opencode_transcripts)
 
-    # Write all output files
-    output_folder = write_output(summary, stats, target_date, project_transcripts)
+        # Collect stats
+        click.echo("Collecting statistics...")
+        stats = collect_stats(project_transcripts, target_date)
+
+        # Generate summary with Claude
+        click.echo("Generating summary with Claude...")
+        summary = generate_summary(transcripts_markdown, target_date)
+
+        # Write all output files
+        # Build a unified sources dict (opencode sessions don't have file paths)
+        all_sources = {**project_transcripts, **copilot_transcripts}
+        for label in opencode_transcripts:
+            all_sources[label] = []  # no file path for DB-backed sessions
+        output_folder = write_output(summary, stats, target_date, all_sources)
+
+        # Copy HTML files if requested (before temp_dir is cleaned up)
+        if save_html:
+            click.echo("Saving HTML files...")
+            copy_html_files(project_html, target_date, output_folder)
+            click.echo(f"HTML files saved to: {output_folder / 'html'}")
+
     click.echo(f"\nOutput written to: {output_folder}")
 
 
